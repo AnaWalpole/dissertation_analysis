@@ -1,0 +1,1819 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE, message = FALSE, fig.width = 11, fig.height = 7)
+```
+
+```{r}
+# import libraries needed for this project...
+#install.packages("mapview")
+#library(ellipsis)
+
+#install.packages("INLA",
+#repos = "https://inla.r-inla-download.org/R/stable", dep = TRUE)
+
+library(sf)
+library(readr)
+library(dplyr)
+library(purrr)
+library(broom)
+library(tidyr)
+library(ggplot2)
+library(viridis)
+library(leaflet)
+library(mapview)
+library(maptools)
+library(tidyverse)
+library(spdep)
+library(rgdal)
+library(janitor)
+library(kableExtra)
+library(tmap) 
+library(gridExtra)
+library(PerformanceAnalytics)
+
+```
+
+
+
+```{r}
+# import shapefiles; one for MSOAs and one for London Boroughs
+# note the shapefiles were downloaded from https://data.london.gov.uk/dataset/statistical-gis-boundary-files-london
+
+setwd("C:/Users/anama/Documents/Dissertation/Shapefiles/statistical-gis-boundaries-london/ESRI")
+shapefile <- st_read("./MSOA_2011_London_gen_MHW.shp", stringsAsFactors = FALSE)
+shapefile_lb <- st_read("./London_Borough_Excluding_MHW.shp", stringsAsFactors = FALSE)
+```
+```{r}
+# view shapefile and check compatibility with covid data and demographics data...
+class(shapefile)
+nrow(shapefile)
+as.data.frame(shapefile)
+```
+```{r}
+# view London Boroughs shapefile and check compatability with covid data and demographics data...
+nrow(shapefile_lb)
+as.data.frame(shapefile_lb)
+```
+
+```{r}
+# import raw cases and deaths data...
+# permanent links to cases and deaths data...
+# https://api.coronavirus.data.gov.uk/v2/data?areaType=utla&metric=cumDeathsByDeathDate&format=csv
+
+setwd("C:/Users/anama/Documents/Dissertation/Covid_data")
+
+raw <- read_csv("msoa_E12000007_2021-05-23.csv")
+#raw
+```
+
+```{r}
+# collate and clean the cases data to produce totals over the entire pandemic period so far...
+
+msoa_cases <- raw %>% group_by(UtlaCode, UtlaName, areaCode, areaName) %>%
+  summarise(total_cases = sum(newCasesBySpecimenDateRollingSum)) %>%
+  mutate(MSOA11CD = areaCode)
+
+names(msoa_cases)[names(msoa_cases) == 'areaCode'] <- 'MSOA_code'
+msoa_cases[msoa_cases$areaName == "City of London", ]
+msoa_cases$UtlaCode[msoa_cases$areaName == "City of London"] = 'E09000001'
+msoa_cases[msoa_cases$areaName == "City of London", ]
+msoa_cases
+
+```
+```{r}
+# import MSOA demographics data...
+
+setwd("C:/Users/anama/Documents/Dissertation/demo_data_2")
+getwd()
+#test <- read.csv("C:/Users/anama/Documents/Dissertation/Demo_data/msoa-data.csv")
+#test
+raw_demo_msoa <- read.csv("msoa-data.csv")
+#raw_demo_msoa <- read_csv("C:/Users/anama/Documents/Dissertation/Demo_data/msoa_data_copy.csv")
+raw_demo_msoa
+#"C:/Users/anama/Documents/Dissertation/Demo_data/london_borough_age_breakdown.csv"
+#raw_demo_msoa
+```
+
+```{r}
+# for now, just extract population for each MSOA...
+# this is to be able to plot the incidence rate per 100,000 inhabitants
+msoa_population <- raw_demo_msoa %>% subset(., select = c(`Middle.Super.Output.Area`, `MSOA.Name`, `Age.Structure..2011.Census..All.Ages.`))
+
+colnames(msoa_population) <- c("MSOA_code","MSOA_name", "total_population")
+
+msoa_population
+
+min(msoa_population$total_population)
+max(msoa_population$total_population)
+mean(msoa_population$total_population)
+
+msoa_population %>% ggplot(aes(total_population)) + geom_boxplot()
+
+# note that the demographics data has a an additional row for overall average. this should be deleted going forward. 
+```
+```{r}
+# join covid cases data frame to population dataframe to calculate SID...
+msoa_cases_pop <- msoa_cases %>% left_join(msoa_population, by='MSOA_code')
+
+#colSums(is.na(SIR))
+#SIR[rowSums(is.na(SIR)) > 0,]
+
+msoa_cases_pop <- msoa_cases_pop %>% mutate(case_rate = total_cases/total_population*1000) 
+
+mean_case_rate <- mean(msoa_cases_pop$case_rate)
+mean_case_rate
+
+r_s <- sum(msoa_cases_pop$total_cases)/sum(msoa_cases_pop$total_population)
+r_s
+
+sum(msoa_cases_pop$total_cases)
+sum(msoa_cases_pop$total_population)
+
+#msoa_cases_pop <- msoa_cases_pop %>% mutate(SIR = case_rate/mean_case_rate) 
+
+msoa_cases_pop <- msoa_cases_pop %>% mutate(E = r_s*total_population) %>%
+                                      mutate(SIR = total_cases/E)
+
+msoa_cases_pop %>% arrange(UtlaName)
+#msoa_cases_pop$UtlaCode == "E02000001"
+msoa_cases_pop[msoa_cases_pop$areaName == "City of London", ]
+msoa_cases_pop$UtlaCode[msoa_cases_pop$areaName == "City of London"] = 'E09000001'
+msoa_cases_pop[msoa_cases_pop$areaName == "City of London", ]
+
+msoa_cases_pop
+```
+
+
+```{r}
+map <- shapefile %>% left_join(msoa_cases_pop, by='MSOA11CD')
+map
+check_map <- as.data.frame(map)
+
+colSums(is.na(check_map))
+
+nrow(shapefile)
+nrow(msoa_cases)
+```
+```{r}
+library(mapview)
+map$IR <- map$SIR
+#remotes::install_github("r-spatial/mapview")
+mapviewOptions(fgb = FALSE)
+#mapview(map, zcol = "case_rate")
+mapview::mapview(map, zcol = "IR")
+#mapview::mapshot(map2, file = "./maptest.png")
+```
+
+```{r}
+borough_cases <- msoa_cases %>% group_by(UtlaCode, UtlaName) %>%
+  summarise(total_cases_lb = sum(total_cases)) #%>%
+  #mutate(MSOA11CD = areaCode)
+
+colnames(borough_cases) <- c("GSS_CODE","LB_name", "total_cases_lb")
+borough_cases
+```
+```{r}
+# import London Borough demographics data...
+
+setwd("C:/Users/anama/Documents/Dissertation/Demo_data")
+raw_demo_lb <- read.csv("london-borough-profiles-new.csv")
+raw_demo_lb
+
+lb_population <- raw_demo_lb %>% subset(., select= c(Code, Area_name, GLA_Population_Estimate_2017))
+
+colnames(lb_population) <- c("GSS_CODE","LB_name", "total_population")
+
+lb_population
+
+
+#shapefile %>% left_join(msoa_cases_pop, by='MSOA11CD')
+```
+```{r}
+lb_cases_pop <- borough_cases %>% left_join(lb_population, by = 'GSS_CODE') %>%
+                                  mutate(case_rate = total_cases_lb/total_population*1000) %>%
+                                  select(-LB_name.x) %>%
+                                  rename(LB_name = LB_name.y)
+
+# rate in the standard population (total number of cases divided by total population in all areas)
+
+r_s <- sum(lb_cases_pop$total_cases_lb)/sum(lb_cases_pop$total_population) 
+r_s
+
+sum(lb_cases_pop$total_cases_lb)
+sum(lb_cases_pop$total_population) 
+
+lb_cases_pop <- lb_cases_pop %>% mutate(E = r_s*total_population) %>%
+                                  mutate(SIR = total_cases_lb/E)
+lb_cases_pop
+
+mean(lb_cases_pop$SIR)
+```
+```{r}
+map_data_lb <- shapefile_lb %>% left_join(lb_cases_pop, by = 'GSS_CODE')
+mapview(map_data_lb, zcol = "SIR")
+```
+# Section 3: Covid-19 Deaths at London Borough Area Level 
+## Standardised Incidence Ratio
+
+```{r}
+# load London Borough Age Breakdown Data...
+
+lb_age_breakdown <- read_csv("C:/Users/anama/Documents/Dissertation/Demo_data/london_borough_age_breakdown.csv")
+
+age_cat_totals <- colSums(lb_age_breakdown[,c(-1, -2, -15)])
+age_breakdown <- data.frame(age_cat_totals)
+age_breakdown <- rownames_to_column(age_breakdown)
+colnames(age_breakdown) <- c('age_cat', 'age_cat_population')
+
+age_breakdown <- age_breakdown %>% filter(age_cat != 'total')
+age_breakdown
+
+age_cat_names <- age_breakdown$age_cat[3:11]
+age_cat_names
+```
+
+```{r}
+# Load Covid-19 death data, by age, across all London...
+
+deaths_by_age <- read_csv("C:/Users/anama/Documents/Dissertation/Covid_data/deaths_by_age_2.csv")
+deaths_by_age2 <- deaths_by_age %>% group_by(age) %>%
+                                    summarise(deaths = sum(deaths)) %>%
+                                    filter(age != '00_59', age != '60+') 
+sum(deaths_by_age2$deaths)
+
+# the demographics data is in 10 year 'chunks' so, add together the 5 year chunks of the deaths data.
+
+deaths_by_age2$OUTPUT <- c(0, sapply(2:nrow(deaths_by_age2), function(k) deaths_by_age2$deaths[k]+deaths_by_age2$deaths[k-1]))
+deaths_by_age3 <- deaths_by_age2[c(seq(2, nrow(deaths_by_age2)-1, 2), 17), ]
+deaths_by_age3$OUTPUT[deaths_by_age3$age == '90+'] = deaths_by_age3$deaths[deaths_by_age3$age == '90+']
+
+deaths_by_age3$age <- age_cat_names
+
+deaths_by_age3 <- deaths_by_age3 %>% subset(., select = c(1,3)) %>%
+                  rename(deaths = OUTPUT)
+colnames(deaths_by_age3) <- c('age_cat', 'deaths')
+
+deaths_by_age3
+
+sum(deaths_by_age3$deaths)
+
+```
+
+
+```{r}
+# Merge age category populations with deaths in each age category...
+# Impute 0 value for age 9 and under as no data...
+# Calculate death rate per age group...
+
+death_age_breakdown <- age_breakdown %>% left_join(deaths_by_age3, by = 'age_cat')
+death_age_breakdown[is.na(death_age_breakdown)] <- 0
+death_age_breakdown <- death_age_breakdown %>% mutate(death_rate = deaths/age_cat_population)
+death_age_breakdown
+
+# Get vector of rates in each age group...
+
+rates <- death_age_breakdown$death_rate
+rates
+```
+```{r}
+# For each borough (i.e. each row in dataframe) multiply age group death rate by number of people in each age group...
+# then sum the rows to get the total standarised expected deaths in each borough...
+
+lb_age_breakdown_E <- data.frame(mapply(`*`,lb_age_breakdown[3:13],rates))
+lb_age_breakdown_E <- data.frame(E=rowSums(lb_age_breakdown_E[1:11]))
+
+lb_age_breakdown_E <- cbind(lb_age_breakdown, lb_age_breakdown_E$E) %>% subset(., select = c(1, 16)) %>%
+                      rename(areaCode = Code, E = `lb_age_breakdown_E$E`) 
+
+lb_age_breakdown_E
+```
+
+```{r}
+# Read in Covid-19 deaths data at London Borough level i.e. get the 'Y' - observed counts data...
+
+death_data_28days <- read_csv("C:/Users/anama/Documents/Dissertation/Covid_data/utla_2021-06-14_28days.csv")
+death_data_28days <- death_data_28days %>% group_by(areaName, areaCode) %>%
+                                            summarise(Y = sum(newDeaths28DaysByDeathDate))
+death_data_28days
+
+```
+
+```{r}
+# Merge the observed counts, Y with the calculated standardises expected counts, E...
+
+standardised_E <- death_data_28days %>% inner_join(lb_age_breakdown_E, by = "areaCode") %>%
+                                          mutate(SMR = Y/E) %>%
+                                          rename(GSS_CODE = areaCode)
+standardised_E
+
+CoL_row <-data.frame("City of London","E09000001", NA, NA, 0)
+names(CoL_row)<-names(standardised_E)
+CoL_row
+
+lb_SMR <- rbind(standardised_E, CoL_row)
+
+#Impute same SIR for City of London as 'Hackney and City of London'...
+
+lb_SMR$SMR[lb_SMR$areaName == 'City of London'] = lb_SMR$SMR[lb_SMR$areaName == 'Hackney and City of London']
+
+lb_SMR
+lb_SMR$SMR
+```
+```{r}
+map_data_lb_deaths <- shapefile_lb %>% left_join(lb_SMR, by = 'GSS_CODE')
+mapview(map_data_lb_deaths, zcol = "SMR")
+```
+
+# Next Section
+
+```{r}
+# import deaths data...
+# not sure if i actually use any of this...
+setwd("C:/Users/anama/Documents/Dissertation/Covid_data")
+raw_deaths <- read_csv("utla_2021-05-24.csv")
+#deaths_by_age <- read_csv("deaths_by_age.csv")
+raw_deaths
+raw_deaths[raw_deaths$areaName == 'City of London', ] # No data entry for City of London. City of London incorporated into Hackney and City of London. Maybe just give the City of London the same rate as Hackney for the purpose of the map, but don't include it as a separate entity  
+
+borough_deaths <- raw_deaths %>% group_by(areaCode, areaName) %>%
+                              summarise(cum_deaths = max(cumDeathsByDeathDate))
+
+colnames(borough_deaths) <- c("GSS_CODE", "Region", "total_deaths")
+borough_deaths
+
+# impute a new row for the City of London as the shapefile contains the city of London
+new_row <- data.frame('E09000001', 'City of London', NA)
+names(new_row) <- c("GSS_CODE", "Region", "total_deaths")
+borough_deaths <- rbind(borough_deaths, new_row)
+
+borough_deaths
+
+lb_deaths_pop <- lb_population %>% left_join(borough_deaths, by = 'GSS_CODE') %>%
+                                  mutate(death_rate = total_deaths/total_population*100000) %>%
+                                  arrange(LB_name)
+#lb_deaths_pop <- drop_na(Region)
+
+lb_deaths_pop <- lb_deaths_pop[!is.na(lb_deaths_pop$Region),]
+
+# Impute the death rate for the City of London to be the same as the 'Hackney and City of London' value. 
+lb_deaths_pop$death_rate[lb_deaths_pop$Region == 'City of London'] = lb_deaths_pop$death_rate[lb_deaths_pop$Region == 'Hackney and City of London']
+
+# Impute the total_deaths for City of London
+
+lb_deaths_pop$total_deaths[lb_deaths_pop$Region == 'City of London'] = lb_deaths_pop$death_rate[lb_deaths_pop$Region == 'City of London'] * lb_deaths_pop$total_population[lb_deaths_pop$Region == 'City of London'] / 100000
+
+lb_deaths_pop
+#lb_population
+
+#overall_death_rate <- sum(lb_deaths_pop$total_deaths)/sum(lb_deaths_pop$total_population)*100000
+#overall_death_rate
+
+#sum(lb_deaths_pop$total_deaths)
+#sum(lb_deaths_pop$total_population)
+# this overall death rate is then split up into different age categories...
+# see next code chunk...
+```
+
+
+```{r}
+# next look at Moran's I values?
+# maybe neighbourhood matrices?
+# maybe further data exploration?
+# although maybe best to consider Moran's I first and pick either borough or MSOA level, otherwise there is going to be almost too much data to explore...
+```
+
+
+```{r}
+# read in shapefiles as a spatial polygons (object/)dataframe?!?...dataframe I think...
+spa_ob <- readOGR("C:/Users/anama/Documents/Dissertation/Shapefiles/statistical-gis-boundaries-london/ESRI/MSOA_2011_London_gen_MHW.shp", verbose = FALSE)
+
+class(spa_ob)
+
+plot(spa_ob)
+
+nb <- poly2nb(spa_ob, snap = 0.1)
+head(nb, 20)
+```
+
+```{r}
+
+lb_spa_ob <- readOGR("C:/Users/anama/Documents/Dissertation/Shapefiles/statistical-gis-boundaries-london/ESRI/London_Borough_Excluding_MHW.shp", verbose = FALSE)
+
+lb_spa_ob@data$NAME
+
+lb_spa_ob@data
+
+#lb_spa_ob@data <- lb_spa_ob@data %>% arrange(NAME)
+
+#changing snap to 1000 means it picks up boroughs across the river! Not sure what the units of snap are...
+nb_lb <- poly2nb(lb_spa_ob, snap = 1000)
+head(nb_lb, 20)
+
+#plot(nb_lb)
+
+```
+Consider MSOA Neighbours first...
+
+```{r}
+# add a column called 'neighbours' in the spa_ob dataframe and initially assign all values to 0...
+spa_ob$neighbours = 0
+
+# test that neighbours have been correctly calculated...
+spa_ob$neighbours[nb[[2]]] <- 1
+spa_ob$neighbours[nb[[44]]] <- 1
+spa_ob$neighbours[nb[[58]]] <- 1
+
+```
+
+```{r}
+coord <- coordinates(spa_ob)
+spa_ob$long <- coord[, 1]
+spa_ob$lat <- coord[, 2]
+spa_ob$ID <- 1:dim(spa_ob@data)[1]
+
+spa_ob
+```
+```{r}
+# Convert the map which is a spatial object of class SpatialPolygonsDataFrame to a simple feature object of class sf with the st_as_sf() function of the sf package
+
+mapsf <- st_as_sf(spa_ob)
+mapsf
+
+ggplot(mapsf) + geom_sf(aes(fill = as.factor(neighbours))) +
+  #geom_text(aes(long, lat, label = ID), color = "white") +
+  theme_bw() + guides(fill = FALSE)
+
+```
+Now check London Borough neighbours...
+
+```{r}
+# add a column called 'neighbours' in the spa_ob dataframe and initially assign all values to 0...
+lb_spa_ob$neighbours = 0
+
+# test that neighbours have been correctly calculated...
+#lb_spa_ob$neighbours[nb_lb[[2]]] <- 1
+#lb_spa_ob$neighbours[nb_lb[[9]]] <- 1
+lb_spa_ob$neighbours[nb_lb[[1]]] <- 1
+
+```
+
+```{r}
+coord <- coordinates(lb_spa_ob)
+lb_spa_ob$long <- coord[, 1]
+lb_spa_ob$lat <- coord[, 2]
+lb_spa_ob$ID <- 1:dim(lb_spa_ob@data)[1]
+
+lb_spa_ob
+```
+```{r}
+# Convert the map which is a spatial object of class SpatialPolygonsDataFrame to a simple feature object of class sf with the st_as_sf() function of the sf package
+
+lb_mapsf <- st_as_sf(lb_spa_ob)
+lb_mapsf
+class(lb_mapsf)
+
+ggplot(lb_mapsf) + geom_sf(aes(fill = as.factor(neighbours))) +
+  geom_text(aes(long, lat, label = ID), color = "white") +
+  theme_bw() + guides(fill = FALSE)
+
+nb_lb[1]
+
+```
+
+```{r}
+# Calculate SIR...
+# There's no evidence that any particular population strata are more of less likely to be infected with Covid, therefore the The expected counts/ rate Ei is just the average rate across all London Boroughs.   
+# is there much point in calculating this then? Not sure...I suppose it gives an indication because of the >1 <1. Yes because it is more interpretable to say 'the risk is greater' or 'the risk in this area is lower'. 
+
+```
+
+```{r}
+# Moran's I...
+# ...for case rate SIR at MSOA level...
+x_bar <- mean(msoa_cases_pop$case_rate)
+#x_bar
+
+xi_xbar <- msoa_cases_pop$case_rate - x_bar
+#xi_xbar
+```
+```{r}
+# test making matrices for moran's I calculation...
+
+tester <- c(1, 2, 3, 4, 5, 6)
+mean_tester <- mean(tester)
+tester_mean <- tester - mean_tester
+n <- length(tester_mean)
+
+mat_1 <- matrix(tester_mean, n , n)
+mat_1
+
+mat_2 <- matrix(tester_mean, n , n, byrow = TRUE)
+mat_2
+
+mat_1*mat_2
+
+
+```
+
+```{r}
+n = length(xi_xbar)
+
+mat_1 <- matrix(xi_xbar, n, n)
+#mat_1
+
+mat_2 <- matrix(xi_xbar, n, n, byrow = TRUE)
+#mat_2
+
+mat_3 <- mat_1*mat_2
+
+dim(mat_3)
+
+#nb
+
+nbmat <- nb2mat(nb, style='B', zero.policy = TRUE)
+#dim(nbmat)
+#sum(nbmat)
+
+mat_4 <- mat_3*nbmat
+
+dim(mat_4)
+
+top <- sum(mat_4)
+
+bottom <- sum(xi_xbar^2)
+
+N <- length(xi_xbar)
+  
+W <- sum(nbmat)
+
+morans_i <- (N/W)*(top/bottom)
+
+morans_i
+
+
+# is the expected value for no spatial correlation? Or complete spatial correlation?
+exp_morans_i <- -1/(N-1)
+exp_morans_i
+
+#var_morans_i <- 
+
+# the zI score for the statistic is computed as: zI = (I - E[I])/sqrt(V[i])
+# where E[I] = -1/(N-1)
+# and V[I] = E[I^2] - E[I]^2
+
+```
+```{r}
+# Moran's I for MSOA and cases...
+msoa_cases_pop
+nb[1]
+msoa_cases_pop$areaName[1]
+
+nbweights.lw <- nb2listw(nb, style="W", zero.policy=T)
+
+moran.test(msoa_cases_pop$SIR, nbweights.lw, zero.policy=T)
+```
+
+```{r}
+# Moran's I for London Boroughs and cases...
+
+# this bit of code just reorders the cases dataframe to ensure it is in the same order as the neighbours matrix...
+# otherwise the Moran's I test doesn't work.
+lb_cases_pop
+target <- lb_spa_ob@data$NAME
+target
+lb_cases_pop <- lb_cases_pop[match(target, lb_cases_pop$LB_name),]
+lb_cases_pop
+
+# calculate Moran's I...
+lb_nbweights.lw <- nb2listw(nb_lb, style="W", zero.policy=T)
+
+moran.test(lb_cases_pop$SIR, lb_nbweights.lw, zero.policy=T)
+
+```
+```{r}
+# Moran's I for London Boroughs and deaths...
+
+# this bit of code just reorders the deaths dataframe to ensure it is in the same order as the neighbours matrix...
+# otherwise the Moran's I test doesn't work.
+#lb_deaths_pop
+#target <- lb_spa_ob@data$NAME
+#lb_deaths_pop <- lb_deaths_pop[match(target, lb_deaths_pop$LB_name),]
+#lb_deaths_pop
+
+#length(lb_deaths_pop$death_rate)
+#lb_nbweights.lw
+
+lb_nbweights.lw <- nb2listw(nb_lb, style="W", zero.policy=T)
+
+# Moran's I test for death_rate...(i.e. not standardised by age)
+#moran.test(lb_deaths_pop$death_rate, lb_nbweights.lw, zero.policy=T)
+
+# Moran's I test for SMR...(i.e. standardised by age)
+
+#lb_deaths_pop
+#target <- lb_spa_ob@data$NAME
+lb_SMR$areaName[lb_SMR$areaName == 'Hackney and City of London'] = 'Hackney' 
+lb_SMR <- lb_SMR[match(target, lb_SMR$areaName),]
+lb_SMR
+target
+
+moran.test(lb_SMR$SMR, lb_nbweights.lw, zero.policy=T)
+
+#lb_SMR$SMR
+
+#length(lb_deaths_pop$death_rate)
+# why does the death have only 32 entries whilst the cases has 33? Oh is it because of City of London that I made? Probably...
+# yeh cos the shape file includes city of London.
+# impute a sensible value for city of London deaths...maybe just make the same as Hackney & City of London? Or I guess you could impute NA. 
+```
+```{r}
+# Don't understand this Moran's I test result because it appears that there is no spatial correlation, but looking at the map, it appears that there is. Is the river having an effect? Should boroughs on either side of the river be considered neighbours? I guess so because there are bridges?? Nope, amending the neighbours to include those over the river doesn't change the outcome much at all. Maybe check the ordering of the neighbours...
+```
+
+```{r}
+lb_deaths_pop$Region[1]
+nb_lb[[1]]
+#yeh something is going wrong here! The first region is the City of London, but the first neighbours corresponds to the neighbours around Kingston-upon-Thames
+nb_lb
+
+lb_deaths_pop
+
+#lb_deaths_pop %>% arrange(LB_name)
+```
+The results of the Moran's I analysis shows that there is spatial correlation present at both MSOA-cases and London Borough- cases & deaths. As this cannot then be used to choose between datasets, then further exploration of the datasets will be carried out. Firstly, the MSOA demographics data will be considered against the case_rate data. 
+
+```{r}
+# Create dataframe with demo data and append case_rate data as a column.
+# create pearson's correlation plot...
+# Create maps and graphs of explanatory variables against case_rate...
+
+
+head(raw_demo_msoa, 5)
+head(msoa_cases, 5)
+
+demo_msoa <- raw_demo_msoa %>%
+              rename(MSOA_code = `Middle.Super.Output.Area`) %>%
+              clean_names() 
+
+head(demo_msoa, 5)
+
+
+```
+
+Some of the demographics data is presented 'twice' because there are columns for count data and then for percentages. i.e. the number of christians, and the percentage of christians. The data set needs to be cleaned to remove repetition. Count data is not so useful because it doesn't take into account the total population of each area. Therefore, count data will be disregarded where percent data is present. 
+Sometimes, there is a binary variable such as 'english as first language'/ 'english not first language' and the percentages for each are presented in 2 columns. As one is simply x and the other is 1-x, both columns do not need to be kept. In this instance, only one column will be kept. 
+
+```{r}
+#demo_msoa
+colnames_df <- as.data.frame(colnames(demo_msoa))
+colnames_df
+#write.csv(colnames_df,"C:/Users/anama/Documents/Dissertation/R Code/colnames_df.csv", row.names = FALSE)
+write.csv(colnames_df,"C:/Users/anama/Documents/Dissertation/r_Code/colnames_df_2.csv", row.names = FALSE)
+```
+
+```{r}
+cols_reduced_2 <- read_csv("C:/Users/anama/Documents/Dissertation/r_code/cols_reduced_2.csv")
+#cols_reduced
+cols_reduced_2 <- cols_reduced_2[cols_reduced_2$Keep == 1, ] %>% drop_na(Keep)
+#cols_reduced
+cols_to_keep <- cols_reduced_2$cols_req_2
+cols_to_keep
+
+cols_to_keep_map_df <- cols_reduced_2 %>% subset(., select = c(cols_req_2, new_name))
+cols_to_keep_map_df
+```
+```{r}
+sum(colnames_df$`colnames(demo_msoa)` %in% cols_to_keep_map_df$cols_req)
+```
+
+
+
+```{r}
+# now take a subset of the msoa_demo data based on the column names that appear in cols_to_keep.
+# then, rename the columns as per the new_name...
+demo_msoa2 <- demo_msoa %>% subset(., select = cols_to_keep) 
+
+colnames(demo_msoa2) <- cols_to_keep_map_df$new_name
+
+demo_msoa2
+```
+
+```{r}
+# mutate the columns that contain count data into percent data.
+# This includes the following columns; num_edu_no, num_edu_L1, num_edu_L2, num_edu_apprenticeship, num_edu_L3, num_edu_L4, num_edu_other
+# also age_70_74, age_75_79, age_80_84, age_85_89, age_90+. Change these into e.g. pc_age_80_over
+
+
+demo_msoa3 <- demo_msoa2 %>% mutate(population_16over = total_population - population_under16) %>%
+                              mutate(pc_edu_no = num_edu_no/population_16over*100, 
+                                     pc_edu_L1 = num_edu_L1/population_16over*100, 
+                                     pc_edu_L2 = num_edu_L2/population_16over*100, 
+                                     pc_edu_apprenticeship = num_edu_apprenticeship/population_16over*100, 
+                                     pc_edu_L3 = num_edu_L3/population_16over*100, 
+                                     pc_edu_L4 = num_edu_L4/population_16over*100, 
+                                     pc_edu_other = num_edu_other/population_16over*100,
+                                     pc_edu_18over_student = num_edu_18over_student/population_16over*100) %>%
+                              mutate(check_tot = pc_edu_no + pc_edu_L1 + pc_edu_L2 + pc_edu_apprenticeship + pc_edu_L3 + pc_edu_L4 + pc_edu_other + pc_edu_18over_student) %>%
+                              subset(., select = -c(num_edu_no, num_edu_L1, num_edu_L2, num_edu_apprenticeship, 
+                                                    num_edu_L3, num_edu_L4, num_edu_other, num_edu_18over_student)) %>%
+                              mutate(pc_age_80_over = (age_80_84 + age_85_89 + `age_90+`)/total_population*100) %>%
+                              subset(., select = -c(population_under16, check_tot, population_16over, age_70_74, age_75_79, 
+                                                    age_80_84, age_85_89, `age_90+`, total_households)) %>%
+                              mutate(pc_cancer = incidence_of_cancer_all/total_population*100,
+                                     pc_breast_cancer = incidence_of_breast_cancer/total_population*100,
+                                     pc_colorectal_cancer = incidence_of_colorectal_cancer/total_population*100,
+                                     pc_lung_cancer = incidence_of_lung_cancer/total_population*100,
+                                     pc_prostate_cancer = incidence_of_prostate_cancer/total_population*100) %>%
+                              subset(., select = -c(incidence_of_cancer_all, incidence_of_breast_cancer, incidence_of_colorectal_cancer,
+                                                    incidence_of_lung_cancer, incidence_of_prostate_cancer)) %>%
+                              mutate(hh_mean_total_income = hh_mean_total_income/1000,
+                                     hh_median_total_income = hh_median_total_income/1000,
+                                     median_house_price = median_house_price/1000)
+
+
+demo_msoa3
+```
+As there are still a lot of columns which could be relevant, the next task is to group the columns into categories for example; ethnicity, education, health. 
+
+```{r}
+# group columns into categories...
+
+colnames(demo_msoa3)
+
+general_cat <- c("MSOA_code", "msoa_name", "total_population", "land_area_hectares", "pop_density")
+
+age_cat <- c("percent_age_0_14", "percent_age_15_64", "percent_age_65_over", "pc_age_80_over")
+
+household_makeup_cat <- c("pc_hh_with_dependent_children", "pc_hh_lone_parent", "pc_hh_one_person", "pc_hh_other")
+
+ethnicity_cat <- c("pc_white", "pc_asian_british", "pc_black_african_caribbean_british", "pc_bame", "pc_mult_ethnic_groups", "pc_other_ethnic_group", "pc_born_uk", "pc_hh_ENFL")
+
+religion_cat <- c("pc_christian", "pc_buddhist", "pc_hindu", "pc_jewish", "pc_muslim", "pc_sikh", "pc_other_religion", "pc_no_religion", "pc_religion_not_stated")
+
+house_ownership_cat <- c("pc_hh_owned_outright", "pc_hh_owned_mortgage", "pc_hh_social_rented", "pc_hh_private_rented", "pc_hh_detached", "pc_hh_semi_detached", "pc_hh_terraced", "pc_hh_apartment", "median_house_price")
+
+employment_cat <- c("pc_economically_active", "unemployment_rate", "pc_economically_inactive", "pc_hh_no_adults_employed", "hh_mean_total_income", "hh_median_total_income", "pc_income_deprivation", "pc_over_60_pension_credit", "pc_lone_parents_not_in_employment")
+
+health_cat <- c("pc_health_activities_limited_a_lot", "pc_health_activities_limited_a_little", "pc_health_activities_not_limited", "pc_v_good_health", "pc_good_health", "pc_fair_health", "pc_bad_health", "pc_v_bad_health", "pc_low_birth_weight", "pc_year6_obese", "pc_age16_obese", "pc_cancer", "pc_breast_cancer", "pc_colorectal_cancer", "pc_lung_cancer", "pc_prostate_cancer", "life_expectancy_males", "life_expectancy_females")
+
+education_cat <- c("pc_edu_no","pc_edu_L1", "pc_edu_L2", "pc_edu_apprenticeship", "pc_edu_L3", "pc_edu_L4", "pc_edu_other", "pc_edu_18over_student")
+
+general_cat_eda <- c("pop_density")
+
+age_cat_eda <- c("percent_age_0_14", "percent_age_65_over")
+
+household_makeup_cat_eda <- c("pc_hh_lone_parent", "pc_hh_one_person")
+
+ethnicity_cat_eda <- c("pc_white", "pc_asian_british")
+
+religion_cat_eda <- c("pc_muslim", "pc_no_religion")
+
+house_ownership_cat_eda <- c("pc_hh_owned_outright", "pc_hh_social_rented")
+
+employment_cat_eda <- c("hh_mean_total_income", "pc_income_deprivation")
+
+health_cat_eda <- c("pc_v_good_health", "life_expectancy_males")
+
+education_cat_eda <- c("pc_edu_no", "pc_edu_L4")
+
+```
+Exploratory Graphs
+
+```{r}
+# add the covid cases data to the dataframe
+demo_msoa3
+msoa_case_rate_sir <- msoa_cases_pop %>% subset(., select = c(MSOA_code, case_rate, SIR))
+
+msoa_demo_cases <- demo_msoa3 %>% left_join(msoa_case_rate_sir, by = 'MSOA_code')
+msoa_demo_cases
+```
+
+```{r}
+# create a 'long' dataframe with the demographics as one column...
+msoa_long <- 
+  msoa_demo_cases %>% 
+    pivot_longer(-c(1:2, 75:76), names_to = 'demographic',
+                          values_to = 'value') 
+
+```
+
+```{r fig1, fig.height = 10, fig.width = 12}
+# "pc_hh_owned_outright", "pc_hh_owned_mortgage", "pc_hh_social_rented", "pc_hh_private_rented", "pc_hh_detached", "pc_hh_semi_detached", #"pc_hh_terraced", "pc_hh_apartment", "median_house_price"
+tmp2x <- msoa_demo_cases %>% rename(MSOA11CD = MSOA_code)
+tmp2x <- shapefile %>% left_join(tmp2x, by = "MSOA11CD")
+
+m1 <- tm_shape(tmp2x) +
+  #tm_borders() +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pop_density', title = 'Population Density (pph)', palette = "viridis") + tm_layout(frame = FALSE)
+  #tm_fill(col = 'median_house_price', palette = "viridis") + #title = 'Median House Price (£)', 
+  #tm_layout(frame = FALSE, title = 'Median House Price (£)', main.title.size =0.25) +
+  #tm_add_legend(type = "fill", alpha = 0.7)
+
+m2 <- tm_shape(tmp2x) +
+  #tm_borders() +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_hh_owned_outright', title = '% Owned Outright', palette = "viridis") + tm_layout(frame = FALSE)
+
+m3 <- tm_shape(tmp2x) +
+  #tm_borders() +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_hh_owned_mortgage', title = '% Owned Mortgage', palette = "viridis") + tm_layout(frame = FALSE)
+
+m4 <- tm_shape(tmp2x) +
+  #tm_borders() +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill(col = 'pc_hh_social_rented', title = '% Social Rent', palette = "viridis") + tm_layout(frame = FALSE)
+
+m5 <- tm_shape(tmp2x) +
+  #tm_borders() +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_hh_private_rented', title = '% Private Rent', palette = "viridis") + tm_layout(frame = FALSE)
+
+m6 <- tm_shape(tmp2x) +
+  #tm_borders() +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_hh_detached', title = '% Detatched', palette = "viridis") + tm_layout(frame = FALSE)
+
+m7 <- tm_shape(tmp2x) +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill(col = 'pc_hh_semi_detached', title = '% Semi-detatched', palette = "viridis") + tm_layout(frame = FALSE)
+
+m8 <- tm_shape(tmp2x) +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_hh_terraced', title = '% Terraced', palette = "viridis") + tm_layout(frame = FALSE)
+
+m9 <- tm_shape(tmp2x) +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_hh_apartment', title = '% Apartment', palette = "viridis") + tm_layout(frame = FALSE) 
+
+#m9
+
+#tmap_arrange(m1, m2, m3, m4, m5, m6, m7, m8, m9, nrow = 3, outer.margins = 0.0)
+tmap_arrange(m1, m2, nrow = 1, outer.margins = 0.0)
+
+
+
+```
+
+```{r}
+general_cat_eda <- c("pop_density")
+age_cat_eda <- c("percent_age_0_14", "percent_age_65_over")
+household_makeup_cat_eda <- c("pc_hh_lone_parent", "pc_hh_one_person")
+ethnicity_cat_eda <- c("pc_white", "pc_asian_british")
+religion_cat_eda <- c("pc_muslim", "pc_no_religion")
+house_ownership_cat_eda <- c("pc_hh_owned_outright", "pc_hh_social_rented")
+employment_cat_eda <- c("hh_mean_total_income", "pc_income_deprivation")
+health_cat_eda <- c("pc_v_good_health", "life_expectancy_males")
+education_cat_eda <- c("pc_edu_no", "pc_edu_L4")
+
+```
+
+```{r fig12, fig.height = 4, fig.width = 10}
+
+eda_m1 <- tm_shape(tmp2x) +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pop_density', title = 'Population density (pph)', palette = "viridis") + tm_layout(frame = FALSE)
+
+eda_m2 <- tm_shape(tmp2x) +
+  tm_format("NLD", frame = FALSE, asp=0) + 
+  tm_fill('pc_edu_L4', title = '% Degree-Level Educated (%)', palette = "viridis") + tm_layout(frame = FALSE)
+
+tmap_arrange(eda_m1, eda_m2, nrow = 1, outer.margins = 0.0)
+```
+
+
+```{r}
+tmp3 <- msoa_long %>% 
+  filter(demographic %in% age_cat)
+tmp3 <- tmp3 %>% rename(MSOA11CD = MSOA_code)
+tmp3 <- shapefile %>% left_join(tmp3, by = "MSOA11CD")
+
+tm_shape(tmp3) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 3, free.scales = TRUE) #free.coords = TRUE)
+
+```
+```{r}
+cor_age <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', age_cat)) 
+cor_household_makeup <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c(household_makeup_cat, 'log_SIR')) 
+cor_ethnicity <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', ethnicity_cat)) 
+cor_religion <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', religion_cat)) 
+cor_house_ownership <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', house_ownership_cat)) 
+cor_employment <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', employment_cat)) 
+cor_health <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', health_cat)) 
+cor_education <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c('log_SIR', education_cat)) 
+
+chart.Correlation(cor_age, histogram = TRUE, pch = 19)
+chart.Correlation(cor_household_makeup, histogram = TRUE, pch = 19)
+chart.Correlation(cor_ethnicity, histogram = TRUE, pch = 19)
+chart.Correlation(cor_religion, histogram = TRUE, pch = 19)
+chart.Correlation(cor_house_ownership, histogram = TRUE, pch = 19)
+chart.Correlation(cor_employment, histogram = TRUE, pch = 19)
+chart.Correlation(cor_health, histogram = TRUE, pch = 19)
+chart.Correlation(cor_education, histogram = TRUE, pch = 19)
+
+```
+
+```{r}
+tmp_age <- msoa_long %>% 
+  filter(demographic %in% age_cat)
+tmp_age <- tmp_age %>% rename(MSOA11CD = MSOA_code)
+tmp_age <- shapefile %>% left_join(tmp_age, by = "MSOA11CD")
+
+tm_shape(tmp_age) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 2, free.scales = TRUE) #free.coords = TRUE)
+
+```
+```{r}
+tmp_eth <- msoa_long %>% 
+  filter(demographic %in% ethnicity_cat)
+tmp_eth <- tmp_eth %>% rename(MSOA11CD = MSOA_code)
+tmp_eth <- shapefile %>% left_join(tmp_eth, by = "MSOA11CD")
+
+tm_shape(tmp_eth) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 3, free.scales = TRUE) #free.coords = TRUE)
+```
+```{r}
+tmp_hh_makeup <- msoa_long %>% 
+  filter(demographic %in% household_makeup_cat)
+tmp_hh_makeup <- tmp_hh_makeup %>% rename(MSOA11CD = MSOA_code)
+tmp_hh_makeup <- shapefile %>% left_join(tmp_hh_makeup, by = "MSOA11CD")
+
+tm_shape(tmp_hh_makeup) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 2, free.scales = TRUE) #free.coords = TRUE)
+```
+```{r}
+tmp_religion <- msoa_long %>% 
+  filter(demographic %in% religion_cat)
+tmp_religion <- tmp_religion %>% rename(MSOA11CD = MSOA_code)
+tmp_religion <- shapefile %>% left_join(tmp_religion, by = "MSOA11CD")
+
+tm_shape(tmp_religion) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 3, free.scales = TRUE) #free.coords = TRUE)
+```
+```{r}
+tmp_employment <- msoa_long %>% 
+  filter(demographic %in% employment_cat)
+tmp_employment <- tmp_employment %>% rename(MSOA11CD = MSOA_code)
+tmp_employment <- shapefile %>% left_join(tmp_employment, by = "MSOA11CD")
+
+tm_shape(tmp_employment) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 3, free.scales = TRUE) #free.coords = TRUE)
+```
+```{r}
+tmp_health <- msoa_long %>% 
+  filter(demographic %in% health_cat)
+tmp_health <- tmp_health %>% rename(MSOA11CD = MSOA_code)
+tmp_health <- shapefile %>% left_join(tmp_health, by = "MSOA11CD")
+
+tm_shape(tmp_health) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 3, free.scales = TRUE) #free.coords = TRUE)
+```
+```{r fig11, fig.height = 4, fig.width = 10}
+tmp_edu <- msoa_long %>% 
+  filter(demographic %in% education_cat_eda)
+tmp_edu <- tmp_edu %>% rename(MSOA11CD = MSOA_code)
+tmp_edu <- shapefile %>% left_join(tmp_edu, by = "MSOA11CD")
+
+tm_shape(tmp_edu) +
+  tm_fill('value', palette = "viridis") + tm_layout(frame = FALSE) +
+  tm_format("NLD", frame = FALSE, asp=0) +
+  #tm_layout(legend.title.size = FALSE) +
+  tm_facets(by = "demographic", nrow = 1, free.scales = TRUE) #free.coords = TRUE)
+```
+
+
+
+
+```{r fig10, fig.height = 4, fig.width = 10}
+msoa_long %>% filter(demographic %in% education_cat_eda) %>%
+  ggplot(aes(value, log(SIR))) +
+  scale_color_brewer(palette="Dark2") +
+  geom_point(alpha = 0.3, col = 'dodgerblue4') +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F, col='red2') +
+  xlab("Percentage (%)") +
+  ylab("log(SIR)") +
+  ggtitle("Education-related Variables vs log(SIR)") + 
+  theme_minimal() #+
+  #theme(line = element_blank(),
+        #text = element_blank(),
+       # title = element_blank()) #+ 
+  #theme(strip.background = element_blank(), 
+  #      strip.text = element_blank(), 
+  #      panel.grid.major = element_blank(),
+  #      panel.grid.minor = element_blank(),)
+
+
+cor(msoa_demo_cases %>% subset(., select = house_ownership_cat))
+```
+
+```{r}
+msoa_long %>% filter(demographic %in% education_cat) %>%
+  ggplot(aes(value, log(SIR))) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("log(SIR)") +
+  ggtitle("Education related Variables vs log(SIR)")
+
+cor(msoa_demo_cases %>% subset(., select = education_cat))
+```
+```{r}
+msoa_long %>% filter(demographic %in% employment_cat) %>%
+  ggplot(aes(value, SIR)) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("SIR") +
+  ggtitle("Employment related Variables vs SIR")
+
+cor(msoa_demo_cases %>% subset(., select = employment_cat))
+```
+```{r}
+msoa_long %>% filter(demographic %in% health_cat) %>%
+  ggplot(aes(value, SIR)) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("SIR") +
+  ggtitle("Health related Variables vs SIR")
+
+cor(msoa_demo_cases %>% subset(., select = health_cat))
+
+```
+
+```{r}
+msoa_long %>% filter(demographic %in% ethnicity_cat) %>%
+  ggplot(aes(value, SIR)) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("SIR") +
+  ggtitle("Ethnicity & related Variables vs SIR")
+
+cor(msoa_demo_cases %>% subset(., select = ethnicity_cat))
+```
+
+```{r}
+msoa_long %>% filter(demographic %in% religion_cat) %>%
+  ggplot(aes(value, log(SIR))) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("log(SIR)") +
+  ggtitle("Religion & related Variables vs log(SIR)")
+
+cor(msoa_demo_cases %>% subset(., select = religion_cat))
+```
+
+
+```{r}
+msoa_long %>% filter(demographic %in% household_makeup_cat) %>%
+  ggplot(aes(value, log(SIR))) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("log(SIR)") +
+  ggtitle("Household Make-up & related Variables vs log(SIR)")
+
+cor(msoa_demo_cases %>% subset(., select = household_makeup_cat))
+```
+```{r}
+msoa_long %>% filter(demographic == 'pop_density') %>%
+  ggplot(aes(value, log(SIR))) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Density (1000s per hectare)") +
+  ylab("log(SIR)") +
+  ggtitle("Population Density vs log(SIR)")
+
+```
+```{r}
+
+msoa_long %>% filter(demographic %in% age_cat) %>%
+  ggplot(aes(value, log(SIR))) +
+  geom_point() +
+  facet_wrap(~demographic, scales = "free") +
+  geom_point(size = 0.5, alpha = 0.1) +
+  geom_smooth(method=loess, SE=F) +
+  xlab("Percentage (%)") +
+  ylab("log(SIR)") +
+  ggtitle("Age & related Variables vs log(SIR)")
+
+cor(msoa_demo_cases %>% subset(., select = age_cat))
+```
+
+
+```{r}
+mod_1 <- lm(SIR ~ poly(median_house_price, degree = 2, raw = T) + pc_hh_terraced + pc_hh_private_rented + pc_edu_L4 + pc_edu_other + pc_income_deprivation + pc_low_birth_weight + pc_fair_health + life_expectancy_males + pc_white + pc_muslim + pc_no_religion + pc_hh_one_person + percent_age_0_14, msoa_demo_cases)
+
+AIC(mod_1)
+glance(mod_1)["r.squared"]
+tidy(mod_1) %>% 
+  kable(digits = 3, caption = "Model 1 Parameters")  %>%  
+  kable_classic(full_width = F)
+drop1(mod_1, test = 'F')
+```
+```{r}
+# Means and Variances between MSOAs...
+# msoa_cases_pop
+summary_means_var <- msoa_cases_pop %>% group_by(UtlaName) %>%
+                    summarise(lb_mean_SIR = mean(SIR), 
+                              lb_var_SIR = var(SIR),
+                              lb_mean_case_rate = mean(case_rate),
+                              lb_var_case_rate = var(case_rate),
+                              lb_sd_case_rate = sd(case_rate)) %>%
+                    arrange(lb_sd_case_rate)
+
+summary_means_var
+
+summary_means_var %>% ggplot(aes(lb_mean_case_rate, lb_sd_case_rate)) +
+                        geom_point() +
+                        geom_smooth(method = "lm")
+
+cor(summary_means_var$lb_mean_case_rate, summary_means_var$lb_sd_case_rate)
+
+msoa_cases_pop %>% arrange(SIR) %>% ggplot(aes(SIR, col = UtlaName)) +
+                    geom_boxplot() #+ 
+                    #facet_wrap(~UtlaName)
+
+mean(msoa_cases_pop$SIR)
+var(msoa_cases_pop$SIR)
+sd(msoa_cases_pop$SIR)
+```
+```{r}
+# Mean and Variance between London Boroughs...
+lb_cases_pop
+summary_means_var_lb <- lb_cases_pop %>% 
+                    summarise(lb_mean_case_rate = mean(case_rate), 
+                              lb_sd_case_rate = sd(case_rate)) %>%
+                    arrange(lb_sd_case_rate)
+
+summary_means_var_lb
+
+mean(lb_cases_pop$SIR)
+var(lb_cases_pop$SIR)
+sd(lb_cases_pop$SIR)
+
+
+```
+
+The variance between boroughs is significantly less than the variance between msoas. This makes sense because the variance within each london borough can be high. For example, the variance in case rate in Hounslow is 568, sd = 24. 
+
+By only looking at london boroughs, the diversity within each borough is 'averaged out'. By averaging, the 'extreme' values are lost. 
+
+```{r}
+# Illustrate the variance across boroughs by plotting 2 maps either side, one showing a borough and the other, the MSOAs within the borough. Show the borough with the greatest variance? Which I think is Hounslow. 
+hounslow_map <- map[map$LAD11NM == 'Hounslow', ]
+mapview(hounslow_map, zcol = "SIR")
+
+# This map visually illustrates how much variation there is within the borough of Hounslow. SIR values range from 0.6 to 1.4. Furthermore, there are clear pockets of areas with higher risk and areas with lower risk. As well as this there appears to be a strong spatial correlation evident even within the borough of Hounslow.
+
+# It it largely for this reason that the cases data at MSOA level will be chosen for this analysis.  
+```
+# Modelling at MSOA Level
+
+```{r}
+#spa_ob@data
+mean_case_rate <- mean(msoa_cases_pop$case_rate)
+cases_df <- msoa_cases_pop %>% mutate(Y = total_cases,
+                          E = mean_case_rate*total_population/1000
+                          ) %>%
+                    mutate(SIR_2 = Y/E) %>%
+                    subset(., select = c(MSOA11CD, Y, E, SIR))
+#spa_ob@data <- spa_ob@data %>% left_join(cases_df, by = "MSOA11CD")
+#cases_df
+
+demo_msoa4 <- demo_msoa3 %>% mutate(MSOA11CD = MSOA_code) %>%
+                subset(., select = -c(MSOA_code, msoa_name, total_population))
+#demo_msoa4
+
+cases_and_demo <- demo_msoa4 %>% left_join(cases_df, by = "MSOA11CD")
+
+spa_ob@data <- spa_ob@data %>% left_join(cases_and_demo, by = "MSOA11CD")
+
+#spa_ob@data <- spa_ob@data %>% left_join(demo_msoa4, by = "MSOA11CD")
+```
+
+```{r}
+spa_ob@data
+```
+
+```{r}
+nb2INLA("map.adj", nb)
+g <- INLA:::inla.read.graph(filename = "map.adj")
+#g
+
+spa_ob$idareau <- 1:nrow(spa_ob@data)
+spa_ob$idareav <- 1:nrow(spa_ob@data)
+msoa_names <- msoa_cases %>% subset(., select = c("MSOA_code", "areaName"))
+colnames(msoa_names) <- c("MSOA11CD", "areaName")
+msoa_names
+spa_ob@data <- spa_ob@data %>% left_join(msoa_names, by = "MSOA11CD")
+
+spa_ob@data
+
+```
+
+
+```{r}
+#spa_ob@data$test <- log(spa_ob@data$SIR)*2
+
+formula <- Y ~ pc_white + pc_muslim + pc_edu_L4 + hh_mean_total_income +  
+  f(idareau, model = "besag", graph = g, scale.model = TRUE) +
+  f(idareav, model = "iid")
+
+
+res <- INLA::inla(formula,
+  family = "poisson", data = spa_ob@data,
+  E = E, control.compute = list(dic = TRUE), 
+  control.predictor = list(compute = TRUE) 
+)
+
+# control.predictor = list(compute = TRUE) tells it to compute the posteria marginals of the parameters
+```
+
+```{r}
+plot(spa_ob@data$pc_muslim, log(spa_ob@data$SIR))
+```
+
+
+```{r}
+summary(res)
+
+res$dic$dic
+```
+```{r}
+head(res$summary.fitted.values)
+cor(spa_ob@data$pc_income_deprivation, spa_ob@data$pc_no_religion)
+
+(cor(res$summary.fitted.values$mean, spa_ob@data$SIR))^2
+```
+```{r fig4, fig.height = 3, fig.width = 5}
+library(ggplot2)
+#alpha <- res$marginals.fixed[[1]]
+alpha <- res$marginals.fixed$pc_edu_L4
+#alpha
+quant_lb <- INLA::inla.qmarginal(0.025, alpha)
+quant_ub <- INLA::inla.qmarginal(0.975, alpha)
+beta_mean <- INLA::inla.qmarginal(0.5, alpha)
+quant_lb
+quant_ub
+beta_mean
+#quant
+
+marginal <- INLA::inla.smarginal(res$marginals.fixed$pc_edu_L4)
+marginal <- data.frame(marginal)
+ggplot(marginal, aes(x = x, y = y)) + geom_line() +
+  labs(x = expression(beta[4]), y = "Density") +
+  geom_vline(xintercept = 0, col = "blue") + 
+  geom_area(data = subset(marginal, x < quant_lb), fill = "black") +
+  geom_area(data = subset(marginal, x > quant_ub), fill = "black") +
+  theme_bw() 
+
+
+```
+
+
+```{r}
+res$summary.random$idareau
+res$summary.random$idareav
+#res$summary.hyperpar
+```
+
+
+
+```{r}
+spa_ob$RR <- res$summary.fitted.values[, "mean"]
+spa_ob$LL <- res$summary.fitted.values[, "0.025quant"]
+spa_ob$UL <- res$summary.fitted.values[, "0.975quant"]
+spa_ob$u_value <- res$summary.random$idareau$mean
+spa_ob$v_value <- res$summary.random$idareav$mean
+
+(sd(res$summary.random$idareau$mean))^2
+(sd(res$summary.random$idareav$mean))^2
+((sd(res$summary.random$idareau$mean))^2)/((sd(res$summary.random$idareav$mean))^2)
+```
+
+```{r}
+pal <- colorNumeric(palette = "YlGn", domain = spa_ob$v_value) #"YlOrRd" "YlGn"
+#pal <- colorNumeric(palette = "viridis", domain = spa_ob$RR)
+#npal <- colorBin("viridis", bins = c(0, 0.25, 0.5, 0.75, 1)) # this is for bins of colour...
+
+labels <- sprintf("<strong> %s </strong> <br/>
+  Observed: %s <br/> Expected: %s <br/>
+  Mean Total Income : %s <br/> SIR: %s <br/> RR: %s (%s, %s)",
+  spa_ob$MSOA11CD, spa_ob$Y, round(spa_ob$E, 2),
+  spa_ob$hh_mean_total_income, round(spa_ob$SIR, 2), round(spa_ob$RR, 2),
+  round(spa_ob$LL, 2), round(spa_ob$UL, 2)) %>% 
+  lapply(htmltools::HTML)
+
+#labels
+
+#class(labels)
+
+```
+
+
+```{r}
+results_sf <- st_as_sf(spa_ob)
+
+results_sf <- st_transform(results_sf, 4326)
+
+```
+
+```{r}
+
+cols_for_app_0 <- colnames(spa_ob@data)
+cols_for_app_0
+cols_for_app_1 <- cols_for_app_0[c(1:16, 88:96, 19, 21, 24, 36, 56, 64, 79)]
+cols_for_app_1
+
+write.csv(cols_for_app_1, file = "C:/Users/anama/Documents/Dissertation/Shapefiles/exported/colnames_for_app.csv")
+
+spa_ob_app <- spa_ob
+spa_ob_app@data <- spa_ob_app@data %>% subset(., select = cols_for_app_1)
+spa_ob_app@data
+
+#class(spa_ob)
+#class(results_sf)
+#st_write(results_sf, "testshape2.shp", driver="ESRI Shapefile")
+# I need to write the results file out so I can import it into another .R file to create the dashboard...
+#writeOGR(obj=spa_ob_app, dsn = "C:/Users/anama/Documents/Dissertation/Shapefiles/exported", layer="tester3", driver="ESRI Shapefile")
+#read_in_tester <- readOGR("C:/Users/anama/Documents/Dissertation/Shapefiles/exported/tester2.shp", verbose = FALSE)
+#read_in_tester
+#class(read_in_tester)
+#tester_sf <- st_as_sf(read_in_tester)
+#tester_sf <- st_transform(tester_sf, 4326)
+```
+
+```{r}
+lRR <- leaflet(results_sf) %>%
+  #addTiles() %>%
+  leaflet::addProviderTiles("CartoDB.Positron") %>% 
+  #addProviderTiles("Esri.WorldGrayCanvas") %>%
+  leaflet::addPolygons(
+    color = "grey", weight = 1, fillColor = ~ pal(v_value),
+    fillOpacity = 0.5,
+    highlightOptions = highlightOptions(weight = 4),
+    label = labels,
+    labelOptions = labelOptions(
+      style =
+        list(
+          "font-weight" = "normal",
+          padding = "3px 8px"
+        ),
+      textsize = "15px", direction = "auto"
+    )
+  ) %>%
+  leaflet::addLegend(
+    pal = pal, values = ~v_value, opacity = 0.5, title = "v_value",
+    position = "bottomright"
+  )
+lRR
+```
+```{r fig5, fig.height = 4, fig.width = 8}
+spa_ob@data %>% 
+  ggplot(aes(SIR, RR)) +
+  scale_color_brewer(palette="Dark2") +
+  geom_point(size = 3, alpha = 0.3, col = 'dodgerblue4') +
+  geom_abline(intercept = 0, slope = 1, lwd = 1, lty = 88, color = "red2") +
+  xlab("IR") +
+  ylab("RR") +
+  ggtitle("Relative Risk (RR) vs Incidence Rate (IR)") + 
+  theme_minimal()
+```
+
+
+```{r}
+# Considering exploratory analysis, create revised category groupings...
+# responses of 'other' have been removed as does not inform.
+# 
+
+general_cat_2 <- c("MSOA_code", "msoa_name", "total_population", "land_area_hectares", "pop_density")
+
+age_cat_2 <- c("percent_age_0_14", "percent_age_15_64", "percent_age_65_over", "pc_age_80_over")
+
+household_makeup_cat_2 <- c("pc_hh_with_dependent_children", "pc_hh_lone_parent", "pc_hh_one_person", "pc_hh_other")
+
+ethnicity_cat_2 <- c("pc_white", "pc_asian_british", "pc_black_african_caribbean_british", "pc_mult_ethnic_groups", "pc_hh_ENFL")
+
+religion_cat_2 <- c("pc_christian", "pc_buddhist", "pc_hindu", "pc_jewish", "pc_muslim", "pc_sikh", "pc_no_religion")
+
+house_ownership_cat_2 <- c("pc_hh_owned_outright", "pc_hh_owned_mortgage", "pc_hh_social_rented", "pc_hh_private_rented", "pc_hh_detached", "pc_hh_semi_detached", "pc_hh_terraced", "pc_hh_apartment", "median_house_price")
+
+employment_cat_2 <- c("pc_economically_active", "unemployment_rate", "hh_mean_total_income", "pc_income_deprivation", "pc_over_60_pension_credit", "pc_lone_parents_not_in_employment")
+
+health_cat_2 <- c("pc_health_activities_limited_a_lot", "pc_health_activities_limited_a_little", "pc_health_activities_not_limited", "pc_v_good_health", "pc_good_health", "pc_fair_health", "pc_bad_health", "pc_v_bad_health", "pc_low_birth_weight", "pc_year6_obese", "pc_age16_obese", "life_expectancy_males", "life_expectancy_females")
+
+education_cat_2 <- c("pc_edu_no", "pc_edu_L1", "pc_edu_L2", "pc_edu_apprenticeship", "pc_edu_L3", "pc_edu_L4", "pc_edu_other", "pc_edu_18over_student")
+```
+
+```{r}
+univariate_analysis <- function(category) {
+  
+  #make blank dataframe?
+  results_df <- data.frame(Predictor = character(),
+                            Estimate=double(),
+                            `CI Lower Bound` = double(), 
+                            `CI Upper Bound` = double(),
+                            `DIC` = double(),
+                            stringsAsFactors=FALSE) 
+  print(category)
+  for (demo in category){
+    print(demo)
+    formula_loop <- as.formula(paste("Y ~", demo, "+ f(idareau, model = 'besag', graph = g, scale.model = TRUE) + f(idareav, model = 'iid')"))
+    print(formula_loop)
+  
+    res_loop <- INLA::inla(formula_loop,
+      family = "poisson", data = spa_ob@data,
+      E = E, control.compute = list(dic = TRUE), 
+      control.predictor = list(compute = TRUE)) 
+      
+    alpha_loop <- res_loop$marginals.fixed[[demo]]
+    quant_lb <- INLA::inla.qmarginal(0.025, alpha_loop)
+    quant_ub <- INLA::inla.qmarginal(0.975, alpha_loop)
+    beta_mean <- INLA::inla.qmarginal(0.5, alpha_loop)
+    DIC_value <- res_loop$dic$dic
+    
+    new_row <- data.frame(demo, round(beta_mean, 3), quant_lb, quant_ub, DIC_value)
+    names(new_row) <- c("Predictor", "Estimate", "CI Lower Bound", "CI Upper Bound", "DIC")
+    # add results to rows of dataframe?
+    results_df <- rbind(results_df, new_row)
+  }
+  return(format(results_df, scientific = FALSE, digits = 1))
+  
+}
+
+univariate_analysis(age_cat_2)
+
+#format(results_df, scientific = FALSE, digits = 1) # or i could use 'round' but this changes the actual number, not just what's displayed.
+
+```
+
+```{r}
+# Considering univariate spatial analysis, create revised category groupings...
+# remove any covariates which are not significant
+# remove covariates which exhibit colinearity, select based on DIC value
+# responses of 'other' have been removed as does not inform.
+# 
+
+multi_cat_1 <- c("percent_age_65_over", "pc_hh_lone_parent", "pc_white", "pc_muslim", "pc_hh_owned_outright", "hh_mean_total_income", "pc_v_good_health", "pc_edu_L4")
+
+multi_cat_2 <- c("percent_age_0_14", "pc_hh_lone_parent", "pc_asian_british", "pc_muslim", "pc_income_deprivation", "life_expectancy_males", "pc_edu_no")
+
+multi_cat_socio <- c("percent_age_65_over", "pc_hh_lone_parent", "pc_white", "pc_mult_ethnic_groups", "pc_muslim")
+
+multi_cat_ecom <- c( "pc_hh_owned_outright", "hh_mean_total_income", "pc_edu_L4")
+
+multi_cat_employment <- c("hh_mean_total_income", "pc_muslim")
+
+multi_cat_health <- c("pc_v_good_health", "life_expectancy_males")
+
+multi_test <- c("hh_mean_total_income", "pc_muslim", "pc_mult_ethnic_groups", "pc_white")
+
+cor_multi <- msoa_demo_cases %>% mutate(log_SIR = log(SIR)) %>% subset(., select = c(multi_cat_2, 'log_SIR')) 
+
+chart.Correlation(cor_multi, histogram = TRUE, pch = 19)
+
+library(psych)
+pairs.panels(cor_multi, #[,c(2:8)]
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE # show correlation ellipses
+             )
+```
+
+```{r}
+multivariate_analysis <- function(category) {
+
+  variables <- paste(category, collapse = ' + ')
+  #print(variables)
+  #make blank dataframe?
+  results_df <- data.frame(Predictor = character(),
+                            Estimate=double(),
+                            `CI Lower Bound` = double(), 
+                            `CI Upper Bound` = double(), 
+                            DIC = double(),
+                            stringsAsFactors=FALSE) 
+  
+  formula_loop <- as.formula(paste("Y ~", variables, "+ f(idareau, model = 'besag', graph = g, scale.model = TRUE) + f(idareav, model = 'iid')"))
+  
+  print(formula_loop)
+  
+  res_loop <- INLA::inla(formula_loop,
+      family = "poisson", data = spa_ob@data,
+      E = E, control.compute = list(dic = TRUE),
+      control.predictor = list(compute = TRUE)) 
+  
+  for (demo in category){    
+    alpha_loop <- res_loop$marginals.fixed[[demo]]
+    quant_lb <- INLA::inla.qmarginal(0.025, alpha_loop)
+    quant_ub <- INLA::inla.qmarginal(0.975, alpha_loop)
+    beta_mean <- INLA::inla.qmarginal(0.5, alpha_loop)
+    DIC_value <- res_loop$dic$dic
+    
+    new_row <- data.frame(demo, round(beta_mean, 3), quant_lb, quant_ub, DIC_value)
+    names(new_row) <- c("Predictor", "Estimate", "CI Lower Bound", "CI Upper Bound", "DIC")
+    # add results to rows of dataframe?
+    results_df <- rbind(results_df, new_row)
+  }
+  
+  return(results_df)
+  
+}
+
+multivariate_analysis(multi_cat_socio)
+
+religion_cat_2
+religion_cat_3 <- c("pc_jewish", "pc_sikh", "pc_no_religion")
+```
+
+```{r}
+base_multivariate <- function(category, base) {
+
+  results_df <- data.frame(`Covariate 1` = character(),
+                           `Cov. 1 Estimate`=double(),
+                           `Cov. 1 CI` = double(), 
+                           `Covariate 2` = character(),
+                           `Cov. 2 Estimate`=double(),
+                           `Cov. 2 CI` = double(),
+                            DIC = double(),
+                            stringsAsFactors=FALSE) 
+
+  for (demo in category){ 
+    
+    if (demo != base) {
+      
+      variables <- paste(base, '+', demo)
+      
+      formula_loop <- as.formula(paste("Y ~", variables, "+ f(idareau, model = 'besag', graph = g, scale.model = TRUE) + f(idareav, model = 'iid')"))
+    
+      print(formula_loop)
+      
+      res_loop <- INLA::inla(formula_loop,
+                            family = "poisson", data = spa_ob@data,
+                            E = E, control.compute = list(dic = TRUE),
+                            control.predictor = list(compute = TRUE))
+      
+      alpha_1 <- res_loop$marginals.fixed[[base]]
+      quant_lb_1 <- INLA::inla.qmarginal(0.025, alpha_1)
+      quant_ub_1 <- INLA::inla.qmarginal(0.975, alpha_1)
+      beta_1_mean <- INLA::inla.qmarginal(0.5, alpha_1)
+      alpha_2 <- res_loop$marginals.fixed[[demo]]
+      quant_lb_2 <- INLA::inla.qmarginal(0.025, alpha_2)
+      quant_ub_2 <- INLA::inla.qmarginal(0.975, alpha_2)
+      beta_2_mean <- INLA::inla.qmarginal(0.5, alpha_2)
+      DIC_value <- res_loop$dic$dic
+      
+      conf_int_1 <- paste('(', round(quant_lb_1, 3), ', ', round(quant_ub_1, 3), ')', collapse = '')
+      conf_int_2 <- paste('(', round(quant_lb_2, 3), ', ', round(quant_ub_2, 3), ')', collapse = '')
+      new_row <- data.frame(base, round(beta_1_mean, 3), conf_int_1, demo, round(beta_2_mean, 3), conf_int_2, round(DIC_value, 0))
+      names(new_row) <- c("Covariate 1", "Cov. 1 Estimate", "Cov. 1 CI", "Covariate 2", "Cov. 2 Estimate", "Cov. 2 CI", "DIC")
+      # add results to rows of dataframe?
+      results_df <- rbind(results_df, new_row)
+    }
+    else {}
+  }
+  
+  return(results_df)
+  
+}
+
+base_multivariate(multi_cat_1, 'hh_mean_total_income')
+```
+```{r}
+reduced_1 <- c("hh_mean_total_income", "pc_muslim", "pc_white")
+reduced_2 <- c("hh_mean_total_income", "pc_muslim", "pc_edu_L4")
+reduced_3 <- c("hh_mean_total_income", "pc_muslim", "pc_v_good_health")
+
+
+multivariate_analysis(reduced_1)
+multivariate_analysis(reduced_2)
+multivariate_analysis(reduced_3)
+```
+```{r}
+reduced_4 <- c("hh_mean_total_income", "pc_muslim", "pc_white", "pc_edu_L4")
+
+multivariate_analysis(reduced_4)
+```
+```{r}
+reduced_5 <- c("hh_mean_total_income", "pc_muslim", "pc_white", "pc_v_good_health")
+
+multivariate_analysis(reduced_5)
+```
+
+```{r}
+reduced_check <- c("pc_edu_L4", "pc_v_good_health")
+multivariate_analysis(reduced_check)
+```
+
+
+```{r}
+variables <- paste(household_makeup_cat, collapse = ' + ')
+
+formula_compiled <- as.formula(paste("Y ~", variables, "+ f(idareau, model = 'besag', graph = g, scale.model = TRUE) + f(idareav, model = 'iid')"))
+  
+print(formula_compiled)
+  
+res_test_3 <- INLA::inla(Y ~ pc_jewish + pc_sikh + pc_no_religion + f(idareau, 
+    model = "besag", graph = g, scale.model = TRUE) + f(idareav, 
+    model = "iid"),
+    family = "poisson", data = spa_ob@data,
+    E = E, control.predictor = list(compute = TRUE)) 
+
+summary(res_test_3)
+
+alpha_test <- res_test_3$marginals.fixed$pc_no_religion
+#alpha_test
+quant_lb <- INLA::inla.qmarginal(0.02500, alpha_test)
+quant_ub <- INLA::inla.qmarginal(0.97500, alpha_test)
+beta_mean <- INLA::inla.qmarginal(0.500, alpha_test)
+
+beta_mean
+quant_lb
+quant_ub
+
+
+res_test$marginals.fixed
+```
+
+# Modelling Job types at London Borough Level 
+
+```{r}
+job_types <- read_csv("C:/Users/anama/Documents/Dissertation/Demo_data/borough_by_sector.csv")
+job_types <- job_types %>% filter(year == '2015')
+job_types_2 <- job_types %>% pivot_wider(names_from = sector, values_from = employee_jobs) 
+
+job_types_2[, 2:19] <- sapply(job_types_2[, 2:19], as.double) 
+
+job_types_2 <- job_types_2 %>% mutate(total = rowSums(.[3:18])) %>%
+                                subset(., select = -c(`All sectors`)) %>%
+                                mutate(across(c(3:18), .fns = ~./total*100)) 
+              
+
+job_types_2 <- janitor::clean_names(job_types_2)
+
+job_types_2
+
+#rowSums(is.na(job_types_2)) 
+#colSums(is.na(job_types_2))
+
+#sapply(job_types_2, class)
+```
+```{r}
+lb_demo <- read_csv("C:/Users/anama/Documents/Dissertation/Demo_data/london-borough-profiles.csv")
+lb_demo_2 <- lb_demo %>% subset(., select = c(Code, Area_name, `Modelled_Household_median_income_estimates_2012/13`)) %>%
+                          filter(!Area_name %in% c("Inner London", "Outer London", "England", "United Kingdom", "London")) %>%
+                          rename(`median_income` = `Modelled_Household_median_income_estimates_2012/13`,
+                                 `area` = `Area_name`) %>%
+                          mutate(median_income = str_extract(string = median_income, pattern = "\\d+,[0-9]+"),
+                                 median_income = str_remove(string = median_income, pattern = ','),
+                                 median_income = as.numeric(median_income))
+                          
+job_types_3 <- lb_demo_2 %>% left_join(job_types_2, by = "area") %>%
+                              rename(`GSS_CODE` = Code)
+
+job_types_3  
+```
+```{r}
+lb_cases_2 <- lb_cases_pop %>% rename(Y = total_cases_lb) %>%
+                              subset(., select = c(`GSS_CODE`, `Y`, `E`))
+lb_cases_2
+
+lb_all_info <- job_types_3 %>% left_join(lb_cases_2, by = "GSS_CODE") %>% subset(., select = -c(year))
+lb_all_info
+```
+```{r}
+spa_ob_lb <- readOGR("C:/Users/anama/Documents/Dissertation/Shapefiles/statistical-gis-boundaries-london/ESRI/London_Borough_Excluding_MHW.shp", verbose = FALSE)
+spa_ob_lb
+
+spa_ob_lb@data <- spa_ob_lb@data %>% left_join(lb_all_info, by = "GSS_CODE")
+spa_ob_lb@data
+
+spa_ob_lb$idareau <- 1:nrow(spa_ob_lb@data)
+spa_ob_lb$idareav <- 1:nrow(spa_ob_lb@data)
+
+nb2INLA("map_lb.adj", nb_lb)
+g_lb <- INLA:::inla.read.graph(filename = "map_lb.adj")
+```
+
+
+```{r}
+formula <- Y ~ financial_and_insurance_activities + 
+  f(idareau, model = "besag", graph = g_lb, scale.model = TRUE) +
+  f(idareav, model = "iid")
+
+
+res <- INLA::inla(formula,
+  family = "poisson", data = spa_ob_lb@data,
+  E = E, control.compute = list(dic = TRUE), 
+  control.predictor = list(compute = TRUE) 
+)
+
+summary(res)
+```
+
+```{r}
+jobs_univariate_analysis <- function(category) {
+  
+  #make blank dataframe?
+  results_df <- data.frame(Predictor = character(),
+                            Estimate=double(),
+                            `CI Lower Bound` = double(), 
+                            `CI Upper Bound` = double(),
+                            `DIC` = double(),
+                            stringsAsFactors=FALSE) 
+  print(category)
+  for (demo in category){
+    print(demo)
+    formula_loop <- as.formula(paste("Y ~", demo, "+ f(idareau, model = 'besag', graph = g_lb, scale.model = TRUE) + f(idareav, model = 'iid')"))
+    print(formula_loop)
+  
+    res_loop <- INLA::inla(formula_loop,
+      family = "poisson", data = spa_ob_lb@data,
+      E = E, control.compute = list(dic = TRUE), 
+      control.predictor = list(compute = TRUE)) 
+      
+    alpha_loop <- res_loop$marginals.fixed[[demo]]
+    quant_lb <- INLA::inla.qmarginal(0.025, alpha_loop)
+    quant_ub <- INLA::inla.qmarginal(0.975, alpha_loop)
+    beta_mean <- INLA::inla.qmarginal(0.5, alpha_loop)
+    DIC_value <- res_loop$dic$dic
+    
+    new_row <- data.frame(demo, round(beta_mean, 3), quant_lb, quant_ub, DIC_value)
+    names(new_row) <- c("Predictor", "Estimate", "CI Lower Bound", "CI Upper Bound", "DIC")
+    # add results to rows of dataframe?
+    results_df <- rbind(results_df, new_row)
+  }
+  return(format(results_df, scientific = FALSE, digits = 1))
+  
+}
+
+```
+
+```{r}
+jobs <- colnames(job_types_3)
+jobs2 <- jobs[c(3,5:19)]
+jobs_univariate_analysis(jobs2)
+```
+```{r}
+# significant increase: manufacturing, wholesale, transportation_and_storage, 
+# significant decrease: accommodation_and_food_service_activities, professional_real_estate_scientific_and_technical_activities, arts_entertainment_and_recreation
+
+# Some of these results are interesting; manufacturing, wholesale and transport/storage have all been shown to be associated with an increase in cases. It could be surmised that these sectors would have been required to work through the pandemic.
+# accommodatio/food, arts/ent/rec as sectors, were largely able to furlough workers and therefore this may explain why these sectors are assocated with a decrease in cases. professional jobs also saw a decrease in cases, this could be because many of these workers were able to work from home. 
+# Interestingly, financial services were not associated with an increase or decrease in cases. 
+
+#This additional work was carried out to try to establish any relationship with cases and job type to help explain the association with income and cases. The results are mostly inconclusive. This could be due to the the areas being too large. Unfortunately, jobs breakdown was not available at MSOA and I think the London Boroughs have too much varaiation in them to be able to draw conclusive evidence. 
+
+corr_data <- spa_ob_lb@data %>% subset(., select = c(jobs2))
+
+chart.Correlation(corr_data, histogram = TRUE, pch = 19)
+
+```
+
